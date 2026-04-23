@@ -1,114 +1,108 @@
 import streamlit as st
 import pandas as pd
 from datetime import datetime, timedelta, time
+import plotly.express as px
 
 # Configuração da página
-st.set_page_config(page_title="Simulador HT Profissional", layout="wide")
+st.set_page_config(page_title="Simulador HT - Estratégico", layout="wide")
 
-st.title("🚀 Planejador de Produção HT - V2.1")
-st.markdown("Simulação de capacidade com regras de fluxo contínuo e paradas de final de semana.")
+st.title("📊 Simulador HT: Planejamento Detalhado")
 
-# --- SIDEBAR: CONFIGURAÇÕES ---
-st.sidebar.header("⚙️ Variáveis do Processo")
-v_aquecimento = st.sidebar.number_input("Tempo de Aquecimento (min)", 10, 300, 54)
-v_carga = st.sidebar.number_input("Tempo de Carga (min)", 1, 120, 10)
-v_descarga = st.sidebar.number_input("Tempo de Descarga (min)", 1, 120, 10)
-v_prep = st.sidebar.number_input("Preparação Estufa (min)", 1, 60, 5)
+# --- SIDEBAR: CONFIGURAÇÕES REAIS (CENÁRIO A) ---
+st.sidebar.header("⚙️ Cenário Atual (Referência)")
+v_aquecimento = st.sidebar.number_input("Aquecimento (min)", 10, 300, 54)
+v_carga = st.sidebar.number_input("Carga (min)", 1, 120, 10)
+v_descarga = st.sidebar.number_input("Descarga (min)", 1, 120, 10)
+v_prep = st.sidebar.number_input("Preparação (min)", 1, 60, 5)
 
 st.sidebar.header("📦 Produtividade")
 v_plts_por_carga = st.sidebar.number_input("Paletes por Carga", 1, 100, 30)
 
-st.sidebar.header("📅 Calendário Operacional")
-# Novo: Opção para rodar sem paradas
+st.sidebar.header("📅 Calendário")
 v_sem_parada = st.sidebar.toggle("Operação 24/7 (Sem Paradas)", value=False)
-
-h_inicio_domingo = st.sidebar.time_input("Início no Domingo", time(22, 0))
-h_fim_sabado = st.sidebar.time_input("Encerramento Sábado", time(13, 30))
+h_inicio_dom = st.sidebar.time_input("Início Domingo", time(22, 0))
+h_fim_sab = st.sidebar.time_input("Fim Sábado", time(13, 30))
 
 # --- MOTOR DE CÁLCULO ---
-def simular_producao():
-    # Fixamos uma data de início (Domingo 19/04/2026 como referência)
-    data_inicio_simulacao = datetime(2026, 4, 19, h_inicio_domingo.hour, h_inicio_domingo.minute)
-    data_limite = data_inicio_simulacao + timedelta(days=7)
-    
+def simular(aquec, carga, descarga, prep, plts, sem_parada):
+    data_inicio = datetime(2026, 4, 19, h_inicio_dom.hour, h_inicio_dom.minute)
+    data_limite = data_inicio + timedelta(days=7)
     ciclos = []
-    tempo_atual = data_inicio_simulacao
-    
-    TEMPO_TRATAMENTO = 32
-    TEMPO_CARIMBAR = 20 
+    tempo_atual = data_inicio
     
     while tempo_atual < data_limite:
-        # Lógica de Parada de Final de Semana (Só processa se o Toggle estiver desligado)
-        if not v_sem_parada:
-            dia_semana = tempo_atual.weekday() # 5 = Sábado, 6 = Domingo
-            hora_atual = tempo_atual.time()
-            
-            # Se for sábado após o horário de corte, pula para o domingo às 22h
-            if dia_semana == 5 and hora_atual >= h_fim_sabado:
-                tempo_atual = tempo_atual.replace(hour=h_inicio_domingo.hour, minute=h_inicio_domingo.minute) + timedelta(days=1)
+        if not sem_parada:
+            if tempo_atual.weekday() == 5 and tempo_atual.time() >= h_fim_sab:
+                tempo_atual = tempo_atual.replace(hour=h_inicio_dom.hour, minute=h_inicio_dom.minute) + timedelta(days=1)
                 continue
-            
-            # Se for domingo antes do horário de início, ajusta para as 22h
-            if dia_semana == 6 and hora_atual < h_inicio_domingo:
-                tempo_atual = tempo_atual.replace(hour=h_inicio_domingo.hour, minute=h_inicio_domingo.minute)
+            if tempo_atual.weekday() == 6 and tempo_atual.time() < h_inicio_dom:
+                tempo_atual = tempo_atual.replace(hour=h_inicio_dom.hour, minute=h_inicio_dom.minute)
                 continue
 
-        # Cálculo dos tempos do ciclo
-        inicio_carga = tempo_atual
-        inicio_ht = inicio_carga + timedelta(minutes=v_carga + v_prep)
-        fim_ht = inicio_ht + timedelta(minutes=v_aquecimento + TEMPO_TRATAMENTO + TEMPO_CARIMBAR)
-        fim_descarga = fim_ht + timedelta(minutes=v_descarga)
+        inicio_ciclo = tempo_atual
+        # Fluxo: Carga + Prep + Aquec + 32m Tratamento + 20m Resfriamento + Descarga
+        fim_ciclo = inicio_ciclo + timedelta(minutes=carga + prep + aquec + 32 + 20 + descarga)
 
-        # Se não for 24/7, verifica se o ciclo invade a parada do sábado
-        if not v_sem_parada:
-            if fim_descarga.weekday() == 5 and fim_descarga.time() > h_fim_sabado:
-                # Empurra o início para o próximo ciclo de domingo
-                tempo_atual = fim_descarga.replace(hour=h_inicio_domingo.hour, minute=h_inicio_domingo.minute) + timedelta(days=1)
-                if tempo_atual >= data_limite: break
-                continue
+        if not sem_parada and fim_ciclo.weekday() == 5 and fim_ciclo.time() > h_fim_sab:
+            tempo_atual = fim_ciclo.replace(hour=h_inicio_dom.hour, minute=h_inicio_dom.minute) + timedelta(days=1)
+            continue
 
-        # Se passou pelas validações, registra a carga
+        if fim_ciclo > data_limite: break
+        
         ciclos.append({
-            "Carga": len(ciclos) + 1,
-            "Dia da Semana": inicio_carga.strftime("%A"),
-            "Data/Hora Início": inicio_carga.strftime("%d/%m %H:%M"),
-            "Fim HT": fim_ht.strftime("%H:%M"),
-            "Fim Descarga": fim_descarga.strftime("%H:%M"),
-            "Paletes": v_plts_por_carga
+            "Tarefa": f"Carga {len(ciclos)+1}",
+            "Início": inicio_ciclo,
+            "Fim": fim_ciclo,
+            "Paletes": plts,
+            "Dia": inicio_ciclo.strftime("%A")
         })
-        
-        # Próxima carga começa onde a anterior terminou
-        tempo_atual = fim_descarga
-        
+        tempo_atual = fim_ciclo
     return pd.DataFrame(ciclos)
 
-df_res = simular_producao()
+# Gerar dados do Cenário A
+df_atual = simular(v_aquecimento, v_carga, v_descarga, v_prep, v_plts_por_carga, v_sem_parada)
 
-# --- INTERFACE DASHBOARD ---
+# --- UI: DASHBOARD ---
+st.subheader("🚀 Performance: Cenário Atual")
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("Total de Cargas", len(df_atual))
+c2.metric("Total de Paletes", f"{len(df_atual) * v_plts_por_carga} PLTs")
+tempo_ciclo_a = v_aquecimento + v_carga + v_descarga + v_prep + 52
+c3.metric("Tempo Ciclo", f"{tempo_ciclo_a} min")
+c4.metric("Ocupação Semanal", f"{round((len(df_atual) * tempo_ciclo_a) / 100.8, 1)}%")
+
+# --- GRÁFICO DE GANTT ---
 st.divider()
-col1, col2, col3, col4 = st.columns(4)
-with col1:
-    st.metric("Total de Cargas", len(df_res))
-with col2:
-    st.metric("Total de Paletes", f"{len(df_res) * v_plts_por_carga} PLTs")
-with col3:
-    tempo_ciclo = v_aquecimento + v_carga + v_descarga + v_prep + 52
-    st.metric("Tempo Ciclo", f"{tempo_ciclo} min")
-with col4:
-    total_horas = (tempo_ciclo * len(df_res)) / 60
-    st.metric("Horas em Operação", f"{round(total_horas, 1)}h")
+st.subheader("📅 Linha do Tempo (Ocupação da Estufa)")
+if not df_atual.empty:
+    fig = px.timeline(df_atual, x_start="Início", x_end="Fim", y="Tarefa", color="Dia",
+                     color_discrete_sequence=px.colors.qualitative.Pastel)
+    fig.update_yaxes(autorange="reversed") 
+    st.plotly_chart(fig, use_container_width=True)
 
-st.subheader("📅 Cronograma de Produção HT")
-if not df_res.empty:
-    # Tradução simples dos dias para ficar mais visual
-    dias_pt = {
-        'Monday': 'Segunda-feira', 'Tuesday': 'Terça-feira', 'Wednesday': 'Quarta-feira',
-        'Thursday': 'Quinta-feira', 'Friday': 'Sexta-feira', 'Saturday': 'Sábado', 'Sunday': 'Domingo'
-    }
-    df_res['Dia da Semana'] = df_res['Dia da Semana'].map(dias_pt)
-    st.dataframe(df_res, use_container_width=True)
-else:
-    st.error("Ajuste os horários: a carga é maior que a janela disponível.")
-
+# --- COMPARAÇÃO DE CENÁRIOS ---
 st.divider()
-st.caption("Dica: Use o botão 'Operação 24/7' na lateral para ignorar a parada de sábado e domingo.")
+st.subheader("⚖️ Simulação de Melhoria (Cenário B)")
+expander = st.expander("Clique para ajustar as variáveis do Cenário B e comparar resultados", expanded=True)
+
+with expander:
+    col_v1, col_v2, col_v3, col_v4 = st.columns(4)
+    s_aq = col_v1.number_input("Simular Aquecimento", 10, 300, v_aquecimento)
+    s_ca = col_v2.number_input("Simular Carga", 1, 120, v_carga)
+    s_de = col_v3.number_input("Simular Descarga", 1, 120, v_descarga)
+    s_pr = col_v4.number_input("Simular Preparação", 1, 60, v_prep)
+
+    df_sim = simular(s_aq, s_ca, s_de, s_pr, v_plts_por_carga, v_sem_parada)
+
+    # Comparação visual
+    diff_cargas = len(df_sim) - len(df_atual)
+    diff_plts = (len(df_sim) * v_plts_por_carga) - (len(df_atual) * v_plts_por_carga)
+    
+    res1, res2 = st.columns(2)
+    res1.metric("Cargas no Cenário B", len(df_sim), delta=diff_cargas)
+    res2.metric("Paletes no Cenário B", f"{len(df_sim) * v_plts_por_carga} PLTs", delta=diff_plts)
+
+if diff_plts > 0:
+    st.success(f"📈 O Cenário B entrega {diff_plts} paletes a mais por semana!")
+elif diff_plts < 0:
+    st.error(f"📉 O Cenário B reduz a produção em {abs(diff_plts)} paletes.")
