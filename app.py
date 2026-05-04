@@ -2,107 +2,139 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime, timedelta, time
 import plotly.express as px
+import plotly.graph_objects as go
 
 # Configuração da página
-st.set_page_config(page_title="Simulador HT - Estratégico", layout="wide")
+st.set_page_config(page_title="Gestão HT - Multiestufas", layout="wide")
 
-st.title("📊 Simulador HT: Planejamento Detalhado")
+SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSNNztHYDN-1icWKcCdUZKovBSFspptohMMW-4BnYIANz75MX3ahlQGbUfoFMIsyQ/pub?gid=602841256&single=true&output=csv"
 
-# --- SIDEBAR: CONFIGURAÇÕES REAIS (CENÁRIO A) ---
-st.sidebar.header("⚙️ Cenário Atual (Referência)")
-v_aquecimento = st.sidebar.number_input("Aquecimento (min)", 10, 300, 54)
-v_carga = st.sidebar.number_input("Carga (min)", 1, 120, 10)
-v_descarga = st.sidebar.number_input("Descarga (min)", 1, 120, 10)
-v_prep = st.sidebar.number_input("Preparação (min)", 1, 60, 5)
+# --- SIDEBAR: FILTROS ---
+st.sidebar.header("📅 Período de Análise")
+col_d1, col_d2 = st.sidebar.columns(2)
+d_inicio = col_d1.date_input("Data Início", datetime(2026, 4, 19))
+d_fim = col_d2.date_input("Data Fim", datetime(2026, 4, 26))
 
-st.sidebar.header("📦 Produtividade")
-v_plts_por_carga = st.sidebar.number_input("Paletes por Carga", 1, 100, 30)
+col_h1, col_h2 = st.sidebar.columns(2)
+h_inicio = col_h1.time_input("Hora Início", time(22, 0))
+h_fim = col_h2.time_input("Hora Fim", time(13, 30))
 
-st.sidebar.header("📅 Calendário")
-v_sem_parada = st.sidebar.toggle("Operação 24/7 (Sem Paradas)", value=False)
-h_inicio_dom = st.sidebar.time_input("Início Domingo", time(22, 0))
-h_fim_sab = st.sidebar.time_input("Fim Sábado", time(13, 30))
+dt_inicio_full = datetime.combine(d_inicio, h_inicio)
+dt_fim_full = datetime.combine(d_fim, h_fim)
 
-# --- MOTOR DE CÁLCULO ---
-def simular(aquec, carga, descarga, prep, plts, sem_parada):
-    data_inicio = datetime(2026, 4, 19, h_inicio_dom.hour, h_inicio_dom.minute)
-    data_limite = data_inicio + timedelta(days=7)
-    ciclos = []
-    tempo_atual = data_inicio
-    
-    while tempo_atual < data_limite:
-        if not sem_parada:
-            if tempo_atual.weekday() == 5 and tempo_atual.time() >= h_fim_sab:
-                tempo_atual = tempo_atual.replace(hour=h_inicio_dom.hour, minute=h_inicio_dom.minute) + timedelta(days=1)
-                continue
-            if tempo_atual.weekday() == 6 and tempo_atual.time() < h_inicio_dom:
-                tempo_atual = tempo_atual.replace(hour=h_inicio_dom.hour, minute=h_inicio_dom.minute)
-                continue
+st.sidebar.divider()
+st.sidebar.header("⚙️ Ajustes Desejáveis (Simulador)")
+v_aq = st.sidebar.number_input("Aquecimento (min)", 10, 300, 54)
+v_ca = st.sidebar.number_input("Carga (min)", 1, 120, 10)
+v_de = st.sidebar.number_input("Descarga (min)", 1, 120, 10)
+v_pr = st.sidebar.number_input("Preparação (min)", 1, 60, 5)
+v_plts = st.sidebar.number_input("Paletes por Carga", 1, 100, 30)
 
-        inicio_ciclo = tempo_atual
-        # Fluxo: Carga + Prep + Aquec + 32m Tratamento + 20m Resfriamento + Descarga
-        fim_ciclo = inicio_ciclo + timedelta(minutes=carga + prep + aquec + 32 + 20 + descarga)
-
-        if not sem_parada and fim_ciclo.weekday() == 5 and fim_ciclo.time() > h_fim_sab:
-            tempo_atual = fim_ciclo.replace(hour=h_inicio_dom.hour, minute=h_inicio_dom.minute) + timedelta(days=1)
-            continue
-
-        if fim_ciclo > data_limite: break
+# --- CARREGAMENTO DE DADOS (ESTUFA 1 E 2) ---
+@st.cache_data(ttl=60)
+def carregar_dados_reais(inicio, fim):
+    try:
+        df_raw = pd.read_csv(SHEET_URL)
+        df_2026 = df_raw.iloc[15523:].copy()
+        df_2026['Lote'] = df_2026['Lote'].astype(str).str.strip()
         
-        ciclos.append({
-            "Tarefa": f"Carga {len(ciclos)+1}",
-            "Início": inicio_ciclo,
-            "Fim": fim_ciclo,
-            "Paletes": plts,
-            "Dia": inicio_ciclo.strftime("%A")
-        })
-        tempo_atual = fim_ciclo
+        # Criar Data/Hora
+        df_2026['Inicio_DT'] = pd.to_datetime(df_2026['Data Inicial Trat.'] + ' ' + df_2026['Hora Inicio Trat.'], dayfirst=True)
+        df_2026['Nº Paletes'] = pd.to_numeric(df_2026['Nº Paletes'], errors='coerce').fillna(0)
+        df_2026['Data_Dia'] = df_2026['Inicio_DT'].dt.date
+        
+        # Filtro de Período
+        mask = (df_2026['Inicio_DT'] >= inicio) & (df_2026['Inicio_DT'] <= fim)
+        df_f = df_2026.loc[mask].copy()
+        
+        # Separar Estufas
+        df_e1 = df_f[df_f['Lote'].str.startswith('1')].copy()
+        df_e2 = df_f[df_f['Lote'].str.startswith('2')].copy()
+        
+        return df_e1, df_e2
+    except: return pd.DataFrame(), pd.DataFrame()
+
+df_real_e1, df_real_e2 = carregar_dados_reais(dt_inicio_full, dt_fim_full)
+
+# --- MOTOR DO SIMULADOR ---
+def simular(inicio, fim, aq, ca, de, pr, plts):
+    ciclos = []
+    tempo_atual = inicio
+    t_ciclo = aq + ca + de + pr + 52
+    while tempo_atual + timedelta(minutes=t_ciclo) <= fim:
+        ini = tempo_atual
+        f = ini + timedelta(minutes=t_ciclo)
+        ciclos.append({"Lote": f"Sim {len(ciclos)+1}", "Início": ini, "Fim": f, "Paletes": plts, "Dia": ini.strftime("%A"), "Data_Dia": ini.date()})
+        tempo_atual = f
     return pd.DataFrame(ciclos)
 
-# Gerar dados do Cenário A
-df_atual = simular(v_aquecimento, v_carga, v_descarga, v_prep, v_plts_por_carga, v_sem_parada)
+df_sim = simular(dt_inicio_full, dt_fim_full, v_aq, v_ca, v_de, v_pr, v_plts)
 
-# --- UI: DASHBOARD ---
-st.subheader("🚀 Performance: Cenário Atual")
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("Total de Cargas", len(df_atual))
-c2.metric("Total de Paletes", f"{len(df_atual) * v_plts_por_carga} PLTs")
-tempo_ciclo_a = v_aquecimento + v_carga + v_descarga + v_prep + 52
-c3.metric("Tempo Ciclo", f"{tempo_ciclo_a} min")
-c4.metric("Ocupação Semanal", f"{round((len(df_atual) * tempo_ciclo_a) / 100.8, 1)}%")
+# --- INTERFACE ---
+st.title("📊 Gestão HT Performance: Estufas 01 & 02")
+tab1, tab2, tab3 = st.tabs(["🎯 Simulador (Desejável)", "🏭 Executável (Real)", "⚖️ Comparativo Geral"])
 
-# --- GRÁFICO DE GANTT ---
-st.divider()
-st.subheader("📅 Linha do Tempo (Ocupação da Estufa)")
-if not df_atual.empty:
-    fig = px.timeline(df_atual, x_start="Início", x_end="Fim", y="Tarefa", color="Dia",
-                     color_discrete_sequence=px.colors.qualitative.Pastel)
-    fig.update_yaxes(autorange="reversed") 
-    st.plotly_chart(fig, use_container_width=True)
-
-# --- COMPARAÇÃO DE CENÁRIOS ---
-st.divider()
-st.subheader("⚖️ Simulação de Melhoria (Cenário B)")
-expander = st.expander("Clique para ajustar as variáveis do Cenário B e comparar resultados", expanded=True)
-
-with expander:
-    col_v1, col_v2, col_v3, col_v4 = st.columns(4)
-    s_aq = col_v1.number_input("Simular Aquecimento", 10, 300, v_aquecimento)
-    s_ca = col_v2.number_input("Simular Carga", 1, 120, v_carga)
-    s_de = col_v3.number_input("Simular Descarga", 1, 120, v_descarga)
-    s_pr = col_v4.number_input("Simular Preparação", 1, 60, v_prep)
-
-    df_sim = simular(s_aq, s_ca, s_de, s_pr, v_plts_por_carga, v_sem_parada)
-
-    # Comparação visual
-    diff_cargas = len(df_sim) - len(df_atual)
-    diff_plts = (len(df_sim) * v_plts_por_carga) - (len(df_atual) * v_plts_por_carga)
+with tab1:
+    st.subheader("Planejamento Teórico")
+    s1, s2, s3 = st.columns(3)
+    s1.metric("Ciclos Totais", len(df_sim))
+    s2.metric("Paletes Totais", len(df_sim) * v_plts)
+    s3.metric("Tempo Ciclo", f"{v_aq + v_ca + v_de + v_pr + 52} min")
     
-    res1, res2 = st.columns(2)
-    res1.metric("Cargas no Cenário B", len(df_sim), delta=diff_cargas)
-    res2.metric("Paletes no Cenário B", f"{len(df_sim) * v_plts_por_carga} PLTs", delta=diff_plts)
+    fig_sim = px.timeline(df_sim, x_start="Início", x_end="Fim", y="Lote", color="Dia", 
+                         color_discrete_sequence=px.colors.qualitative.Pastel, title="Escalonamento Ideal por Dia")
+    fig_sim.update_yaxes(autorange="reversed")
+    st.plotly_chart(fig_sim, use_container_width=True)
 
-if diff_plts > 0:
-    st.success(f"📈 O Cenário B entrega {diff_plts} paletes a mais por semana!")
-elif diff_plts < 0:
-    st.error(f"📉 O Cenário B reduz a produção em {abs(diff_plts)} paletes.")
+with tab2:
+    st.subheader("Dados Reais da Planilha")
+    e1, e2 = st.columns(2)
+    with e1:
+        st.write("### Estufa 01")
+        st.metric("Ciclos E1", len(df_real_e1))
+        st.dataframe(df_real_e1[['Lote', 'Data Inicial Trat.', 'Nº Paletes']], use_container_width=True, hide_index=True)
+    with e2:
+        st.write("### Estufa 02")
+        st.metric("Ciclos E2", len(df_real_e2))
+        st.dataframe(df_real_e2[['Lote', 'Data Inicial Trat.', 'Nº Paletes']], use_container_width=True, hide_index=True)
+
+with tab3:
+    st.subheader("Análise de Tendência e GAP (Estufa 01 vs Desejável)")
+    
+    # 1. Gráfico de Linhas: Evolução Diária de Ciclos
+    st.write("#### Ciclos Realizados Dia a Dia")
+    
+    # Agrupar ciclos por dia
+    resumo_sim = df_sim.groupby('Data_Dia').size().reset_index(name='Desejável')
+    resumo_real = df_real_e1.groupby('Data_Dia').size().reset_index(name='Realizado')
+    
+    # Unir dados para o gráfico de linha
+    df_linha = pd.merge(resumo_sim, resumo_real, on='Data_Dia', how='outer').fillna(0)
+    df_linha = df_linha.sort_values('Data_Dia')
+    
+    fig_linha = go.Figure()
+    fig_linha.add_trace(go.Scatter(x=df_linha['Data_Dia'], y=df_linha['Desejável'], name='Desejável', line=dict(color='green', width=3, dash='dot')))
+    fig_linha.add_trace(go.Scatter(x=df_linha['Data_Dia'], y=df_linha['Realizado'], name='Realizado (E1)', line=dict(color='blue', width=3)))
+    
+    fig_linha.update_layout(xaxis_title="Data", yaxis_title="Quantidade de Ciclos", hovermode="x unified")
+    st.plotly_chart(fig_linha, use_container_width=True)
+    
+    # 2. Cards de Resumo
+    st.divider()
+    c1, c2, c3, c4 = st.columns(4)
+    r_c = len(df_real_e1)
+    s_c = len(df_sim)
+    r_p = int(df_real_e1['Nº Paletes'].sum())
+    s_p = s_c * v_plts
+    
+    c1.metric("Ciclos (Real E1)", r_c)
+    c2.metric("Ciclos (Desejável)", s_c, delta=r_c - s_c)
+    c3.metric("Paletes (Real E1)", r_p)
+    c4.metric("Paletes (Desejável)", s_p, delta=r_p - s_p)
+
+    # 3. Comparativo Global de Barras
+    df_bar = pd.DataFrame({
+        "Categoria": ["Real E1", "Real E2", "Desejável"],
+        "Paletes": [r_p, int(df_real_e2['Nº Paletes'].sum()), s_p]
+    })
+    st.plotly_chart(px.bar(df_bar, x="Categoria", y="Paletes", color="Categoria", text_auto=True, title="Volume Total por Categoria"), use_container_width=True)
